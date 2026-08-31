@@ -295,8 +295,133 @@ def decrypt_file(key, input_file, output_file):
 
     Args:
         key: 16-byte AES content key.
-        input_file: open binary input (readable, ``rb``).
-        output_file: open binary output (writable, ``wb``).
+        input_file: open binary input (readable, ``rb``). May be a regular
+            file, a pipe, or ``sys.stdin.buffer``.
+        output_file: open binary output (writable, ``wb``). May be a regular
+            file, a pipe, or ``sys.stdout.buffer``.
     """
-    data = input_file.read()
-    output_file.write(decrypt_bytes(key, data))
+    decrypt_stream(key, input_file, output_file)
+
+
+# --------------------------------------------------------------------------- #
+# Streaming decryption (bounded memory; suitable for pipes / stdin / stdout)
+# --------------------------------------------------------------------------- #
+
+def _read_exact(stream, n):
+    """Read exactly ``n`` bytes from ``stream``, blocking until available.
+
+    Returns fewer than ``n`` bytes only at EOF. Unlike ``read(n)`` on a pipe
+    (which may return as soon as *some* data is available), this loops until
+    the full request is satisfied — essential for parsing box headers.
+    """
+    if n <= 0:
+        return b''
+    chunks = []
+    remaining = n
+    while remaining > 0:
+        chunk = stream.read(remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b''.join(chunks)
+
+
+def _copy_n(instream, outstream, n):
+    """Copy ``n`` bytes from instream to outstream in chunks (no buffering)."""
+    remaining = n
+    while remaining > 0:
+        chunk = instream.read(min(remaining, 65536))
+        if not chunk:
+            break
+        outstream.write(chunk)
+        remaining -= len(chunk)
+
+
+def decrypt_stream(key, instream, outstream):
+    """Stream-decrypt a CENC-encrypted fragmented MP4.
+
+    Reads boxes incrementally from ``instream`` and writes decrypted boxes
+    to ``outstream`` as they are parsed. Memory use is bounded — each
+    ``mdat`` is processed sample-by-sample rather than loaded whole — so
+    this is suitable for pipes (stdin/stdout) and live pipelines.
+
+    Requires the ``moov`` box (init segment) to appear before the first
+    ``moof``, which is always the case for fragmented MP4 / DASH.
+
+    Args:
+        key: 16-byte AES content key.
+        instream: binary input stream with a ``read`` method.
+        outstream: binary output stream with a ``write`` method.
+    """
+    frma = None
+    iv_size = None
+    has_sub = None
+    pending_senc = None
+    pending_sizes = None
+
+    while True:
+        head = _read_exact(instream, 8)
+        if len(head) < 8:
+            break  # clean EOF
+        size = struct.unpack('>I', head[:4])[0]
+        typ = head[4:8]
+        full_hdr = head
+        if size == 1:                       # 64-bit extended size
+            ext = _read_exact(instream, 8)
+            if len(ext) < 8:
+                break
+            full_hdr += ext
+            size = struct.unpack('>Q', ext)[0]
+        elif size == 0:                     # box extends to end of stream
+            size = None
+        body_size = (size - len(full_hdr)) if size is not None else None
+
+        if typ == b'moov':
+            body = _read_exact(instream, body_size)
+            if frma is None:
+                frma = _frma_type(body)
+            tree = parse_one(b'moov', body)
+            _strip_and_patch(tree, frma)
+            outstream.write(serialize(tree))
+            outstream.flush()
+
+        elif typ == b'moof':
+            body = _read_exact(instream, body_size)
+            sencs = _find_senc_bodies(body)
+            if iv_size is None and sencs:
+                iv_size, has_sub = detect_format(sencs[0])
+            pending_senc = sencs[0] if sencs else None
+            truns = _find_box_bodies(body, b'trun')
+            pending_sizes = parse_trun(truns[0])[0] if truns else []
+            tree = parse_one(b'moof', body)
+            removed = _strip_and_patch(tree, frma)
+            _fix_trun_offset(tree, removed)
+            outstream.write(serialize(tree))
+            outstream.flush()
+
+        elif typ == b'mdat':
+            # Output header: size is preserved (AES-CTR keeps length).
+            outstream.write(full_hdr if size is not None else head)
+            samples, _ = (parse_senc(pending_senc, iv_size, has_sub)
+                          if pending_senc and iv_size is not None else ([], 0))
+            sizes = pending_sizes or []
+            for (iv, subs), sz in zip(samples, sizes):
+                if not subs:
+                    ct = _read_exact(instream, sz)
+                    outstream.write(_ctr(key, iv, ct))
+                else:
+                    for cb, eb in subs:
+                        outstream.write(_read_exact(instream, cb))
+                        ct = _read_exact(instream, eb)
+                        outstream.write(_ctr(key, iv, ct))
+            # Unencrypted mdat (no senc): stream-copy the body.
+            if not samples and body_size:
+                _copy_n(instream, outstream, body_size)
+            outstream.flush()
+
+        else:
+            # Pass-through (ftyp, styp, sidx, free, ...).
+            body = _read_exact(instream, body_size if body_size is not None else 0)
+            outstream.write(full_hdr + body)
+            outstream.flush()

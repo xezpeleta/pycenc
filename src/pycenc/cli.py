@@ -1,7 +1,14 @@
-"""Command-line interface: ``pycenc --key KID:KEY input.mp4 output.mp4``.
+"""Command-line interface.
+
+Examples::
+
+    pycenc --key KID:KEY input.m4s output.mp4        # file -> file
+    pycenc --key KID:KEY - -                          # stdin -> stdout (stream)
+    pycenc --stream --key KID:KEY                     # stdin -> stdout (stream)
 
 Mirrors the common ``mp4decrypt`` invocation so it can be used as a
-drop-in for single-key CENC content.
+drop-in for single-key CENC content, while also supporting streaming
+pipes (for live pipelines: yt-dlp | pycenc | ffmpeg | vlc).
 """
 from __future__ import annotations
 
@@ -44,9 +51,23 @@ def main(argv=None):
                         "Repeatable; currently a single key is used.")
     p.add_argument('-V', '--version', action='version',
                    version=f'pycenc {__version__}')
-    p.add_argument('input', help='Encrypted fragmented MP4 input path')
-    p.add_argument('output', help='Decrypted MP4 output path')
+    p.add_argument('--stream', action='store_true',
+                   help="Stream mode: read stdin, write stdout "
+                        "(shorthand for input='-' output='-').")
+    p.add_argument('input', nargs='?', default=None,
+                   help="Encrypted fragmented MP4 input path "
+                        "('-' or omitted with --stream for stdin)")
+    p.add_argument('output', nargs='?', default=None,
+                   help="Decrypted MP4 output path "
+                        "('-' or omitted with --stream for stdout)")
     args = p.parse_args(argv)
+
+    if args.stream:
+        args.input = args.input or '-'
+        args.output = args.output or '-'
+    if args.input is None or args.output is None:
+        p.error("the following arguments are required: input output "
+                "(or use --stream for stdin/stdout)")
 
     keys = [_parse_key(k) for k in args.key]
     if len(keys) > 1:
@@ -54,9 +75,41 @@ def main(argv=None):
               "implemented. Using the first key.", file=sys.stderr)
     key = keys[0]
 
-    with open(args.input, 'rb') as f_in, open(args.output, 'wb') as f_out:
+    # Open input.
+    if args.input == '-':
+        f_in = sys.stdin.buffer
+        close_in = False
+    else:
+        f_in = open(args.input, 'rb')
+        close_in = True
+
+    # Open output.
+    if args.output == '-':
+        f_out = sys.stdout.buffer
+        close_out = False
+    else:
+        f_out = open(args.output, 'wb')
+        close_out = True
+
+    try:
         decrypt_file(key, f_in, f_out)
-    print(f"wrote {args.output}")
+    except BrokenPipeError:
+        # Downstream consumer closed the pipe (e.g. player exited).
+        # Exit quietly.
+        try:
+            sys.stderr.close()
+        except Exception:
+            pass
+    finally:
+        if close_in:
+            f_in.close()
+        if close_out:
+            f_out.close()
+        else:
+            f_out.flush()
+
+    if not args.stream and args.output != '-':
+        print(f"wrote {args.output}")
 
 
 if __name__ == '__main__':

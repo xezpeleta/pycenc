@@ -16,8 +16,8 @@ Or from the command line::
 """
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
-from .cenc import decrypt_bytes, decrypt_file
+from .cenc import decrypt_bytes, decrypt_file, decrypt_stream
 
-__all__ = ["decrypt_bytes", "decrypt_file", "__version__"]
+__all__ = ["decrypt_bytes", "decrypt_file", "decrypt_stream", "__version__"]

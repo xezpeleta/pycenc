@@ -14,7 +14,7 @@ import tempfile
 
 import pytest
 
-from pycenc import decrypt_bytes, decrypt_file
+from pycenc import decrypt_bytes, decrypt_file, decrypt_stream
 from pycenc.boxes import iter_raw_boxes, parse_boxes, parse_one, serialize, Box
 from pycenc.cenc import (
     _ctr,
@@ -237,6 +237,74 @@ def test_decrypt_file_round_trip(tmp_path):
             assert clear[off + hdr:off + size] == b"".join(plaintexts)
             return
     pytest.fail("no mdat in output")
+
+
+# --------------------------------------------------------------------------- #
+# Streaming decryption
+# --------------------------------------------------------------------------- #
+
+class _SlowStream:
+    """A read() that returns at most `chunk` bytes per call, to simulate a
+    pipe that yields partial reads. Stresses _read_exact."""
+    def __init__(self, data, chunk=1):
+        self._data = data
+        self._pos = 0
+        self._chunk = chunk
+    def read(self, n=-1):
+        if self._pos >= len(self._data):
+            return b""
+        if n is None or n < 0:
+            n = len(self._data) - self._pos
+        n = min(n, self._chunk)
+        chunk = self._data[self._pos:self._pos + n]
+        self._pos += n
+        return chunk
+
+
+def test_stream_matches_bytes():
+    """Streaming output must be byte-identical to the batch output."""
+    import io
+    key = b"\x55" * 16
+    plaintexts = [b"alpha sample " * 5, b"beta " * 40, b"gamma" * 10]
+    mp4, _ = _build_synthetic_fragmented_mp4(key, plaintexts)
+    batch = decrypt_bytes(key, mp4)
+    out = io.BytesIO()
+    decrypt_stream(key, io.BytesIO(mp4), out)
+    assert out.getvalue() == batch
+
+
+def test_stream_with_partial_reads():
+    """Streaming must work when read() returns one byte at a time."""
+    import io
+    key = b"\x99" * 16
+    plaintexts = [b"streaming segment payload " * 4, b"second fragment" * 8]
+    mp4, _ = _build_synthetic_fragmented_mp4(key, plaintexts)
+    out = io.BytesIO()
+    decrypt_stream(key, _SlowStream(mp4, chunk=1), out)
+    # verify the decrypted mdat matches the original plaintexts
+    clear = out.getvalue()
+    for typ, hdr, size, off in iter_raw_boxes(clear):
+        if typ == b"mdat":
+            assert clear[off + hdr:off + size] == b"".join(plaintexts)
+            return
+    pytest.fail("no mdat in output")
+
+
+def test_stream_produces_no_whole_file_buffer():
+    """Streaming should not need to buffer the whole input — verify it works
+    even when the output is read incrementally (no seek needed)."""
+    import io
+    key = b"\x33" * 16
+    plaintexts = [b"x" * 5000, b"y" * 3000]  # multi-sample, multi-fragment-ish
+    mp4, _ = _build_synthetic_fragmented_mp4(key, plaintexts)
+    instream = _SlowStream(mp4, chunk=7)  # awkward chunk size
+    outstream = io.BytesIO()
+    decrypt_stream(key, instream, outstream)
+    # sanity: output has an mdat with the concatenated plaintext
+    clear = outstream.getvalue()
+    mdats = [clear[off + hdr:off + size]
+             for typ, hdr, size, off in iter_raw_boxes(clear) if typ == b"mdat"]
+    assert b"".join(mdats) == b"".join(plaintexts)
 
 
 # --------------------------------------------------------------------------- #
