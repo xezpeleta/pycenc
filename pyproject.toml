@@ -1,0 +1,45 @@
+[project]
+name = "pycenc"
+version = "0.1.0"
+description = "Pure-Python CENC (Common Encryption) decryptor for fragmented MP4"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Xabi Ezpeleta", email = "xezpeleta@gmail.com" }
+]
+requires-python = ">=3.9"
+keywords = ["cenc", "widevine", "drm", "mp4", "dash", "aes-ctr", "decryption", "fragmented-mp4"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Security :: Cryptography",
+]
+dependencies = [
+    "cryptography>=42.0.0",
+]
+
+[project.scripts]
+pycenc = "pycenc.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/xezpeleta/pycenc"
+Repository = "https://github.com/xezpeleta/pycenc"
+Issues = "https://github.com/xezpeleta/pycenc/issues"
+
+[build-system]
+requires = ["uv_build>=0.12.0,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
